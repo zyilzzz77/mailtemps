@@ -146,8 +146,19 @@ if [ -f "$CADDY_FILE" ] && docker ps --format '{{.Names}}' | grep -qx "$CADDY_CO
     docker exec "$CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile || true
     die "blok caddy baru tidak valid; Caddyfile host dikembalikan seperti semula"
   fi
-  docker exec "$CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile
-  log "caddy: blok mailtemps.space aktif dan reloaded (backup: $BACKUP)"
+
+  # Admin API caddy host dimatikan (admin off), jadi reload tidak tersedia.
+  # Satu-satunya cara mengaktifkan blok baru: restart container (downtime ~1-2 detik).
+  log "admin API off — restart $CADDY_CONTAINER untuk mengaktifkan blok mailtemps"
+  docker restart "$CADDY_CONTAINER" >/dev/null
+  caddy_ok=0
+  for _ in $(seq 1 30); do
+    code="$(curl -sk -m 5 --resolve mailtemps.space:443:127.0.0.1 -o /dev/null -w '%{http_code}' https://mailtemps.space/ || true)"
+    if [ "$code" != "000" ] && [ -n "$code" ]; then caddy_ok=1; break; fi
+    sleep 2
+  done
+  [ "$caddy_ok" = "1" ] || die "caddy tidak kembali setelah restart; periksa: docker logs $CADDY_CONTAINER"
+  log "caddy aktif kembali dengan blok mailtemps.space (backup: $BACKUP)"
 else
   log "SKIP caddy: $CADDY_FILE atau container $CADDY_CONTAINER tidak ditemukan"
 fi

@@ -80,6 +80,18 @@ fi
 log "build + jalankan stack"
 $COMPOSE up -d --build --remove-orphans
 
+log "hubungkan api+web ke network caddy host"
+CADDY_NET="exisel-production_edge"
+if docker network inspect "$CADDY_NET" >/dev/null 2>&1; then
+  for svc in api web; do
+    cname="mailtemps-${svc}-1"
+    if ! docker network inspect "$CADDY_NET" --format '{{range .Containers}}{{.Name}} {{end}}' | grep -qw "$cname"; then
+      docker network connect --alias "mailtemps-${svc}" "$CADDY_NET" "$cname"
+      log "network: $cname masuk $CADDY_NET"
+    fi
+  done
+fi
+
 log "tunggu postgres + redis sehat"
 ok=0
 for _ in $(seq 1 90); do
@@ -136,7 +148,9 @@ if [ -f "$CADDY_FILE" ] && docker ps --format '{{.Names}}' | grep -qx "$CADDY_CO
   fi
   BACKUP="$CADDY_FILE.bak.$(date +%Y%m%d%H%M%S)"
   cp "$CADDY_FILE" "$BACKUP"
-  { echo ""; echo "$MARK_START"; cat "$APP_DIR/deploy/Caddyfile"; echo "$MARK_END"; } >> "$CADDY_FILE"
+  # Caddy host jalan di dalam container, jadi upstream pakai nama container
+  # (terhubung lewat network exisel-production_edge), bukan 127.0.0.1 host.
+  { echo ""; echo "$MARK_START"; sed -e 's/127\.0\.0\.1:8081/mailtemps-api:8081/g' -e 's/127\.0\.0\.1:3001/mailtemps-web:3000/g' "$APP_DIR/deploy/Caddyfile"; echo "$MARK_END"; } >> "$CADDY_FILE"
   ls -1t "$CADDY_FILE".bak.* 2>/dev/null | tail -n +11 | xargs -r rm -f
 
   log "validasi konfigurasi caddy"

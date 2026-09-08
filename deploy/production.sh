@@ -44,7 +44,13 @@ log "=== mulai deploy/update ==="
 
 log "tarik kode terbaru"
 if [ -d .git ]; then
+  BEFORE="$(git rev-parse HEAD)"
   git pull --ff-only origin main
+  AFTER="$(git rev-parse HEAD)"
+  if [ "$BEFORE" != "$AFTER" ] && ! git diff --quiet "$BEFORE" "$AFTER" -- deploy/production.sh; then
+    log "production.sh diperbarui — jalankan ulang dengan versi baru"
+    exec bash "$APP_DIR/deploy/production.sh"
+  fi
 else
   git clone --depth 1 https://github.com/zyilzzz77/mailtemps.git "$APP_DIR"
   cd "$APP_DIR"
@@ -150,7 +156,10 @@ if [ -f "$CADDY_FILE" ] && docker ps --format '{{.Names}}' | grep -qx "$CADDY_CO
   cp "$CADDY_FILE" "$BACKUP"
   # Caddy host jalan di dalam container, jadi upstream pakai nama container
   # (terhubung lewat network exisel-production_edge), bukan 127.0.0.1 host.
-  { echo ""; echo "$MARK_START"; sed -e 's/127\.0\.0\.1:8081/mailtemps-api:8081/g' -e 's/127\.0\.0\.1:3001/mailtemps-web:3000/g' "$APP_DIR/deploy/Caddyfile"; echo "$MARK_END"; } >> "$CADDY_FILE"
+  BLOCK="$(cat "$APP_DIR/deploy/Caddyfile")"
+  BLOCK="${BLOCK//127.0.0.1:8081/mailtemps-api:8081}"
+  BLOCK="${BLOCK//127.0.0.1:3001/mailtemps-web:3000}"
+  { echo ""; echo "$MARK_START"; printf '%s\n' "$BLOCK"; echo "$MARK_END"; } >> "$CADDY_FILE"
   ls -1t "$CADDY_FILE".bak.* 2>/dev/null | tail -n +11 | xargs -r rm -f
 
   log "validasi konfigurasi caddy"

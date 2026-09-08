@@ -25,10 +25,7 @@ mailtemps.space {
     }
 
     log {
-        output file /var/log/caddy/mailtemps.access.log {
-            roll_size 25MiB
-            roll_keep 5
-        }
+        output stdout
         format json
     }
 }

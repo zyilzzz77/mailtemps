@@ -80,21 +80,38 @@ swaks --server localhost:2525 --from sender@example.com --to ALAMAT_DARI_UI --he
 
 ## Deployment pada server dengan Caddy yang sudah aktif
 
-1. Ganti password dalam `.env`.
-2. Ubah `SMTP_BIND_IP=0.0.0.0` dan `SMTP_PUBLIC_PORT=25`.
-3. Jalankan `docker compose up --build -d`.
-4. Gabungkan isi `deploy/Caddyfile` ke Caddyfile host, validasi, lalu reload Caddy.
-5. Arahkan DNS berikut ke IP server:
+Cara termudah: jalankan `deploy/production.sh` di server (VPS `142.248.82.88`).
 
-```dns
-mailtemps.space.      A     <IP_SERVER>
-mx.mailtemps.space.   A     <IP_SERVER>
-mailtemps.space.      MX 10 mx.mailtemps.space.
+```bash
+# di server
+git clone https://github.com/zyilzzz77/mailtemps.git /opt/mailtemps
+cd /opt/mailtemps
+bash deploy/production.sh
 ```
 
-6. Buka firewall TCP 80/443 untuk Caddy dan TCP 25 untuk SMTP receiver.
+Script ini idempotent — untuk update selanjutnya cukup `bash deploy/production.sh` lagi. Yang dilakukan:
 
-Jika memakai Cloudflare, record `mx.mailtemps.space` harus DNS-only untuk proxy DNS biasa.
+1. `git pull` kode terbaru
+2. Generate `.env` production (password Postgres acak) jika belum ada
+3. Build + jalankan stack: postgres, redis, api, smtp, worker, web
+4. Migrasi database idempotent (tabel `schema_migrations`)
+5. Smoke test: `/readyz`, buat inbox, homepage
+6. Pasang blok Caddy `mailtemps.space` ke Caddyfile host yang sudah ada — dengan backup otomatis, `caddy validate`, dan reload. Kalau validasi gagal, file host dikembalikan otomatis.
+7. Buka `25/tcp` di UFW untuk SMTP
+
+Sub-perintah lain: `bash deploy/production.sh status` dan `bash deploy/production.sh logs`.
+
+### DNS + SSL
+
+Arahkan DNS di Cloudflare:
+
+```dns
+mailtemps.space.       A     142.248.82.88   (proxied OFF dulu agar Let's Encrypt bisa issue)
+mx.mailtemps.space.    A     142.248.82.88   (wajib DNS-only)
+mailtemps.space.       MX 10 mx.mailtemps.space.
+```
+
+SSL (`https://mailtemps.space`) diterbitkan otomatis oleh Caddy lewat Let's Encrypt setelah record A mengarah ke server. Setelah sertifikat terbit, proxy Cloudflare boleh diaktifkan lagi (mode Full/Strict).
 
 ## Validasi source
 

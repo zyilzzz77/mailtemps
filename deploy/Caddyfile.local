@@ -1,0 +1,29 @@
+(mailtemps_local_proxy) {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8081
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:3001
+    }
+}
+
+http://localhost {
+    bind 127.0.0.1
+    import mailtemps_local_proxy
+}
+
+https://localhost {
+    bind 127.0.0.1
+    tls internal
+    import mailtemps_local_proxy
+}

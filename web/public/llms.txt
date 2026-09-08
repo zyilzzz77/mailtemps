@@ -1,0 +1,33 @@
+# MailTemps
+
+> MailTemps is a free, receive-only temporary email service. An inbox starts at 10 minutes, can be extended twice by 10 minutes, and can be deleted manually. No registration is required.
+
+## Main pages
+
+- https://mailtemps.space/
+- https://mailtemps.space/about
+- https://mailtemps.space/privacy
+- https://mailtemps.space/terms
+- https://mailtemps.space/acceptable-use
+- https://mailtemps.space/abuse
+- https://mailtemps.space/contact
+
+## Guides
+
+- https://mailtemps.space/guides/what-is-temp-mail
+- https://mailtemps.space/guides/how-temp-mail-works
+- https://mailtemps.space/guides/is-temp-mail-safe
+- https://mailtemps.space/guides/disposable-email
+- https://mailtemps.space/guides/10-minute-mail
+- https://mailtemps.space/guides/temp-mail-for-testing
+- https://mailtemps.space/guides/temporary-email-security
+- https://mailtemps.space/guides/protect-email-from-spam
+
+## Product facts and limits
+
+- The service receives email but does not send or reply.
+- Inbox access uses a secret token; the server stores its hash.
+- The interface displays plain text and does not render remote email HTML, images, scripts, or tracking pixels.
+- Temporary email is not guaranteed anonymous or end-to-end encrypted.
+- Do not use it for banking, sensitive data, important accounts, or long-term recovery.
+- The product API supports the MailTemps frontend and is not currently offered as a documented public developer API.

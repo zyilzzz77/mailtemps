@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+tmp/
+backend/bin/
+web/.next/
+web/node_modules/
+

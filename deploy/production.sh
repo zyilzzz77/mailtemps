@@ -150,7 +150,7 @@ log "web OK (http=$PAGE)"
 log "pasang blok caddy mailtemps.space"
 if [ -f "$CADDY_FILE" ] && docker ps --format '{{.Names}}' | grep -qx "$CADDY_CONTAINER"; then
   if grep -qF "$MARK_START" "$CADDY_FILE"; then
-    sed -i "/$MARK_START/,/$MARK_END/d" "$CADDY_FILE"
+    sed -i "\\|$MARK_START|,\\|$MARK_END|d" "$CADDY_FILE"
   fi
   BACKUP="$CADDY_FILE.bak.$(date +%Y%m%d%H%M%S)"
   cp "$CADDY_FILE" "$BACKUP"

@@ -157,8 +157,13 @@ func (s *session) Data(reader io.Reader) error {
 	if counter.read > s.backend.cfg.MaxMessageBytes {
 		return permanentError(552, "ukuran email melebihi batas")
 	}
-	if textBody == "" && htmlBody != "" {
-		textBody = "Email ini hanya memiliki versi HTML. Tampilan HTML dinonaktifkan untuk keamanan."
+	if strings.TrimSpace(textBody) == "" && htmlBody != "" {
+		textBody = htmlToText(htmlBody)
+	} else if looksLikeHTML(textBody) {
+		textBody = htmlToText(textBody)
+	}
+	if strings.TrimSpace(textBody) == "" {
+		textBody = "Email ini tidak memiliki konten teks yang dapat ditampilkan."
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

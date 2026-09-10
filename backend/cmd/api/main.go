@@ -13,6 +13,7 @@ import (
 	"mailtemps.space/backend/internal/config"
 	"mailtemps.space/backend/internal/httpapi"
 	"mailtemps.space/backend/internal/infra"
+	"mailtemps.space/backend/internal/mailsender"
 )
 
 func main() {
@@ -37,7 +38,16 @@ func main() {
 		defer redisClient.Close()
 	}
 
-	handler := httpapi.New(cfg, pool, redisClient, logger).Handler()
+	sender, err := mailsender.NewDirect(cfg, logger)
+	if err != nil {
+		logger.Error("mail sender init failed", "error", err)
+		os.Exit(1)
+	}
+	if !cfg.OutboundEnabled {
+		logger.Info("outbound email disabled")
+	}
+
+	handler := httpapi.New(cfg, pool, redisClient, sender, logger).Handler()
 	server := &http.Server{
 		Addr:              cfg.APIAddr,
 		Handler:           handler,

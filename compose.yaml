@@ -80,6 +80,7 @@ services:
       context: ./web
       args:
         API_PROXY_TARGET: http://api:8081
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}
     restart: unless-stopped
     environment:
       API_PROXY_TARGET: http://api:8081

@@ -1,7 +1,10 @@
 version: "2"
 sql:
   - engine: postgresql
-    schema: internal/database/migrations/000001_init.up.sql
+    schema:
+      - internal/database/migrations/000001_init.up.sql
+      - internal/database/migrations/000002_inbox_extension_limit.up.sql
+      - internal/database/migrations/000003_outbound_messages.up.sql
     queries: internal/database/queries
     gen:
       go:

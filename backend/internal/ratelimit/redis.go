@@ -8,28 +8,42 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type Limiter struct {
-	client *redis.Client
-	limit  int64
+type counter interface {
+	Incr(ctx context.Context, key string) *redis.IntCmd
+	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
 }
 
-func New(client *redis.Client, limit int64) *Limiter {
-	return &Limiter{client: client, limit: limit}
+type Limiter struct {
+	client counter
+	limit  int64
+	window time.Duration
+	now    func() time.Time
+}
+
+func New(client counter, limit int64, window time.Duration) *Limiter {
+	if window <= 0 {
+		window = time.Minute
+	}
+	return &Limiter{client: client, limit: limit, window: window, now: time.Now}
 }
 
 func (l *Limiter) Allow(ctx context.Context, identity string) (bool, error) {
 	if l == nil || l.client == nil {
 		return true, nil
 	}
-	window := time.Now().UTC().Unix() / 60
-	key := fmt.Sprintf("mailtemps:rate:create:%s:%d", identity, window)
+	seconds := int64(l.window / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	windowIndex := l.now().UTC().Unix() / seconds
+	key := fmt.Sprintf("mailtemps:rate:create:%s:%d", identity, windowIndex)
 
 	count, err := l.client.Incr(ctx, key).Result()
 	if err != nil {
 		return true, err
 	}
 	if count == 1 {
-		_ = l.client.Expire(ctx, key, 2*time.Minute).Err()
+		_ = l.client.Expire(ctx, key, l.window).Err()
 	}
 	return count <= l.limit, nil
 }

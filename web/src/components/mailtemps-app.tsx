@@ -10,7 +10,9 @@ import {
   CircleCheckBig,
   Copy,
   Mail,
+  PenLine,
   RefreshCw,
+  Send,
   ShieldCheck,
   Trash2,
   TriangleAlert,
@@ -22,16 +24,47 @@ import HomepageSeo from "@/components/homepage-seo";
 import {
   ApiError,
   apiRequest,
+  sendInboxMessage,
   type InboxPayload,
   type MessagePayload,
 } from "@/lib/api";
+import { sanitizeEmailHtml } from "@/lib/sanitize";
 
 type InboxSession = { id: string; token: string; version: number };
 type ConfirmMode = "replace" | "finish";
+type InboxView = "inbox" | "sent";
+type ToastTone = "success" | "error";
+type Toast = { message: string; tone: ToastTone };
 type MailtempsAppProps = { mode: "generator" | "inbox"; version?: number };
 
 const STORAGE_KEY = "mailtemps.inbox.v1";
 const MAIL_DOMAIN = "mailtemps.space";
+const TURNSTILE_SITE_KEY = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || "0x4AAAAAAEur9TakuO4XajKU";
+const TURNSTILE_SCRIPT_URL = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+
+function loadTurnstileScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.turnstile) {
+      resolve();
+      return;
+    }
+    const existing = document.querySelector<HTMLScriptElement>("script[data-turnstile]");
+    if (existing) {
+      existing.addEventListener("load", () => resolve());
+      existing.addEventListener("error", () => reject(new Error("Turnstile failed to load")));
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = TURNSTILE_SCRIPT_URL;
+    script.async = true;
+    script.defer = true;
+    script.dataset.turnstile = "true";
+    script.addEventListener("load", () => resolve());
+    script.addEventListener("error", () => reject(new Error("Turnstile failed to load")));
+    document.head.appendChild(script);
+  });
+}
+
 const RING_LENGTH = 264;
 const relativeTime = new Intl.RelativeTimeFormat("id-ID", {
   numeric: "auto",
@@ -80,6 +113,25 @@ function initials(name: string, address: string) {
   return (name.trim() || address.trim() || "M").slice(0, 1).toUpperCase();
 }
 
+function trapDialogTab(event: KeyboardEvent, container: HTMLElement | null) {
+  if (event.key !== "Tab" || !container) return;
+  const focusable = Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), [href], input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    ),
+  );
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === container)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
   const router = useRouter();
   const isDevelopment = process.env.NODE_ENV === "development";
@@ -94,11 +146,25 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
   const [actionPending, setActionPending] = useState(false);
   const [formError, setFormError] = useState("");
   const [actionError, setActionError] = useState("");
-  const [toastMessage, setToastMessage] = useState("");
+  const [toast, setToast] = useState<Toast | null>(null);
   const [confirmMode, setConfirmMode] = useState<ConfirmMode | null>(null);
+  const [activeView, setActiveView] = useState<InboxView>("inbox");
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeTo, setComposeTo] = useState("");
+  const [composeSubject, setComposeSubject] = useState("");
+  const [composeBody, setComposeBody] = useState("");
+  const [sending, setSending] = useState(false);
+  const [composeError, setComposeError] = useState("");
   const toastTimer = useRef<number | null>(null);
   const confirmDialog = useRef<HTMLDivElement | null>(null);
+  const composeDialog = useRef<HTMLDivElement | null>(null);
   const lastFocusedElement = useRef<HTMLElement | null>(null);
+  const turnstileRef = useRef<HTMLDivElement | null>(null);
+  const turnstileWidgetId = useRef("");
+  const turnstileToken = useRef("");
+  const composeTurnstileRef = useRef<HTMLDivElement | null>(null);
+  const composeTurnstileWidgetId = useRef("");
+  const composeTurnstileToken = useRef("");
 
   useEffect(() => {
     let savedSession: InboxSession | null = null;
@@ -148,6 +214,97 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
   }, []);
 
   useEffect(() => {
+    if (mode !== "generator" || !TURNSTILE_SITE_KEY) return;
+    let cancelled = false;
+    loadTurnstileScript()
+      .then(() => {
+        if (cancelled || !turnstileRef.current || !window.turnstile) return;
+        turnstileWidgetId.current = window.turnstile.render(turnstileRef.current, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: "auto",
+          callback: (token: string) => {
+            turnstileToken.current = token;
+          },
+          "expired-callback": () => {
+            turnstileToken.current = "";
+          },
+          "error-callback": () => {
+            turnstileToken.current = "";
+          },
+        });
+      })
+      .catch(() => {
+        setFormError("Verifikasi keamanan gagal dimuat. Muat ulang halaman lalu coba lagi.");
+      });
+    return () => {
+      cancelled = true;
+      if (turnstileWidgetId.current && window.turnstile) {
+        window.turnstile.remove(turnstileWidgetId.current);
+        turnstileWidgetId.current = "";
+        turnstileToken.current = "";
+      }
+    };
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "inbox" || !composeOpen || !TURNSTILE_SITE_KEY) return;
+    let cancelled = false;
+    loadTurnstileScript()
+      .then(() => {
+        if (cancelled || !composeTurnstileRef.current || !window.turnstile) return;
+        composeTurnstileWidgetId.current = window.turnstile.render(composeTurnstileRef.current, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: "auto",
+          callback: (token: string) => {
+            composeTurnstileToken.current = token;
+          },
+          "expired-callback": () => {
+            composeTurnstileToken.current = "";
+          },
+          "error-callback": () => {
+            composeTurnstileToken.current = "";
+          },
+        });
+      })
+      .catch(() => {
+        setComposeError("Verifikasi keamanan gagal dimuat. Muat ulang halaman lalu coba lagi.");
+      });
+    return () => {
+      cancelled = true;
+      if (composeTurnstileWidgetId.current && window.turnstile) {
+        window.turnstile.remove(composeTurnstileWidgetId.current);
+        composeTurnstileWidgetId.current = "";
+        composeTurnstileToken.current = "";
+      }
+    };
+  }, [mode, composeOpen]);
+
+  useEffect(() => {
+    if (!composeOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusFrame = window.requestAnimationFrame(() => composeDialog.current?.focus());
+
+    function handleDialogKeys(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setComposeOpen(false);
+        return;
+      }
+      trapDialogTab(event, composeDialog.current);
+    }
+
+    document.addEventListener("keydown", handleDialogKeys);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", handleDialogKeys);
+      document.body.style.overflow = previousOverflow;
+      if (lastFocusedElement.current?.isConnected) lastFocusedElement.current.focus();
+    };
+  }, [composeOpen]);
+
+  useEffect(() => {
     if (!confirmMode) return;
 
     const previousOverflow = document.body.style.overflow;
@@ -161,23 +318,7 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
         setConfirmMode(null);
         return;
       }
-      if (event.key !== "Tab" || !confirmDialog.current) return;
-
-      const focusable = Array.from(
-        confirmDialog.current.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])',
-        ),
-      );
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === confirmDialog.current)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      trapDialogTab(event, confirmDialog.current);
     }
 
     document.addEventListener("keydown", handleDialogKeys);
@@ -230,6 +371,11 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
     { revalidateOnFocus: false, shouldRetryOnError: false },
   );
 
+  const safeHtml = useMemo(
+    () => (messageData?.message.html_body ? sanitizeEmailHtml(messageData.message.html_body) : ""),
+    [messageData],
+  );
+
   const secondsLeft = data?.inbox
     ? Math.max(0, Math.ceil((new Date(data.inbox.expires_at).getTime() - now) / 1000))
     : 0;
@@ -247,13 +393,19 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
     return normalized || "inbox";
   }, [mailName]);
 
-  function showToast(message: string) {
+  function showToast(message: string, tone: ToastTone = "success") {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    setToastMessage(message);
+    setToast({ message, tone });
     toastTimer.current = window.setTimeout(() => {
-      setToastMessage("");
+      setToast(null);
       toastTimer.current = null;
-    }, 2200);
+    }, tone === "error" ? 4200 : 2200);
+  }
+
+  function openCompose() {
+    lastFocusedElement.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setComposeError("");
+    setComposeOpen(true);
   }
 
   async function createInbox(event: FormEvent<HTMLFormElement>) {
@@ -261,9 +413,14 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
     setCreating(true);
     setFormError("");
     try {
+      const token = turnstileToken.current;
+      if (TURNSTILE_SITE_KEY && !token) {
+        setFormError("Selesaikan verifikasi keamanan di bawah tombol terlebih dahulu.");
+        return;
+      }
       const payload = await apiRequest<InboxPayload>("/api/v1/inboxes", undefined, {
         method: "POST",
-        body: JSON.stringify({ name: mailName }),
+        body: JSON.stringify({ name: mailName, turnstile_token: token }),
       });
       const nextSession = { id: payload.inbox.id, token: payload.access_token ?? "", version: 0 };
       window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(nextSession));
@@ -273,6 +430,8 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
     } catch (requestError) {
       setFormError(requestError instanceof Error ? requestError.message : "The inbox could not be created.");
     } finally {
+      turnstileToken.current = "";
+      if (turnstileWidgetId.current && window.turnstile) window.turnstile.reset(turnstileWidgetId.current);
       setCreating(false);
     }
   }
@@ -377,6 +536,42 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
     });
   }
 
+  async function sendEmail(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session) return;
+    setSending(true);
+    setComposeError("");
+    try {
+      const token = composeTurnstileToken.current;
+      if (TURNSTILE_SITE_KEY && !token) {
+        setComposeError("Selesaikan verifikasi keamanan di bawah tombol terlebih dahulu.");
+        return;
+      }
+      await sendInboxMessage(session.id, session.token, {
+        to: composeTo,
+        subject: composeSubject,
+        body: composeBody,
+        turnstile_token: token,
+      });
+      setComposeTo("");
+      setComposeSubject("");
+      setComposeBody("");
+      setComposeOpen(false);
+      await mutate();
+      setActiveView("sent");
+      showToast("Email sent", "success");
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "Email could not be sent.";
+      setComposeError(message);
+      showToast(message, "error");
+      await mutate();
+    } finally {
+      composeTurnstileToken.current = "";
+      if (composeTurnstileWidgetId.current && window.turnstile) window.turnstile.reset(composeTurnstileWidgetId.current);
+      setSending(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
@@ -426,6 +621,7 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
             <button className="primary-button create-button" type="submit" disabled={creating}>
               <Mail aria-hidden="true" /> {creating ? "Creating…" : "Create inbox"}
             </button>
+            {TURNSTILE_SITE_KEY ? <div className="turnstile-wrap" ref={turnstileRef} /> : null}
             {formError ? <p className="form-error" role="alert">{formError}</p> : null}
             {isDevelopment ? <p className="local-notice">Local mode · send test mail to SMTP localhost:2525. Gmail works only after public DNS MX and the mail server are active.</p> : null}
           </form>
@@ -449,6 +645,7 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
               <p className="deck-note">Ready to receive email. New messages are checked automatically every five seconds.</p>
               {isDevelopment ? <p className="local-notice compact">Local mode · test email arrives through SMTP localhost:2525, not from Gmail.</p> : null}
               <div className="deck-actions">
+                <button className="secondary-button compose-trigger" type="button" onClick={openCompose} disabled={actionPending}><PenLine aria-hidden="true" /> Compose</button>
                 <button className="primary-button" type="button" onClick={copyAddress} disabled={!data}><Copy aria-hidden="true" />{copied ? "Copied" : "Copy address"}</button>
                 <button className="secondary-button" type="button" onClick={() => requestInboxClose("replace")} disabled={actionPending}>Change address</button>
                 <button className="finish-button" type="button" onClick={() => requestInboxClose("finish")} disabled={actionPending}><CircleCheckBig aria-hidden="true" /> Finish</button>
@@ -468,6 +665,42 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
           {error ? <div className="service-error" role="alert">The inbox connection was lost. Make sure the API is running, then refresh.</div> : null}
           {actionError && !confirmMode ? <div className="service-error" role="alert">{actionError}</div> : null}
 
+          <div className="view-tabs" role="tablist" aria-label="Inbox views">
+            <button className={`view-tab ${activeView === "inbox" ? "is-active" : ""}`} type="button" role="tab" aria-selected={activeView === "inbox"} onClick={() => setActiveView("inbox")}>
+              <Mail aria-hidden="true" /> Inbox
+            </button>
+            <button className={`view-tab ${activeView === "sent" ? "is-active" : ""}`} type="button" role="tab" aria-selected={activeView === "sent"} onClick={() => setActiveView("sent")}>
+              <Send aria-hidden="true" /> Sent{data?.sent?.length ? ` (${data.sent.length})` : ""}
+            </button>
+          </div>
+
+          {activeView === "sent" ? (
+            <section className="mail-workspace is-single" aria-label="Sent messages">
+              <aside className="mail-list-panel">
+                <div className="panel-heading">
+                  <div><p className="eyebrow">Sent messages</p><h2>{data?.sent?.length ?? 0} email</h2></div>
+                  <button className={`icon-button ${isValidating ? "is-spinning" : ""}`} type="button" onClick={() => mutate()} aria-label="Refresh sent messages"><RefreshCw aria-hidden="true" /></button>
+                </div>
+                <ul className="mail-list">
+                  {data?.sent?.length ? data.sent.map((mail, index) => (
+                    <li className="mail-list-entry" key={mail.id}>
+                      <div className="mail-item is-static">
+                        <span className="sender-mark" data-color={index % 2 === 0 ? "orange" : "blue"}>{initials("", mail.recipients[0] ?? "")}</span>
+                        <span className="mail-summary">
+                          <span className="mail-meta"><strong>{mail.recipients.join(", ") || "No recipient"}</strong><time dateTime={mail.received_at}>{timeAgo(mail.received_at)}</time></span>
+                          <span className="mail-subject">{mail.subject || "No subject"}</span>
+                          <span className="mail-preview">{mail.status === "failed" ? mail.error_message || "Delivery failed" : mail.preview || "Sent"}</span>
+                        </span>
+                        <span className="status-badge" data-status={mail.status === "failed" ? "failed" : "sent"}>{mail.status === "failed" ? "Failed" : "Sent"}</span>
+                      </div>
+                    </li>
+                  )) : (
+                    <li className="empty-list"><span><Send aria-hidden="true" /></span><strong>No sent mail</strong><p>Messages you send appear here.</p></li>
+                  )}
+                </ul>
+              </aside>
+            </section>
+          ) : (
           <section className={`mail-workspace ${effectiveSelectedId ? "has-message-open" : ""}`} aria-label="Kotak masuk sementara">
             <aside className="mail-list-panel">
               <div className="panel-heading">
@@ -507,22 +740,61 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
                       <p className="eyebrow">{timeAgo(messageData.message.received_at)}</p>
                       <h2>{messageData.message.subject || "No subject"}</h2>
                       <div className="sender-line"><span className="sender-mark large" data-color="blue">{initials(messageData.message.sender_name, messageData.message.sender_address)}</span><div><strong>{messageData.message.sender_name || "Sender"}</strong><span>{messageData.message.sender_address}</span></div></div>
-                      <div className="message-body"><p>{messageData.message.text_body || "This email does not have a safe text version to display."}</p></div>
+                      <div className="message-body">{safeHtml ? <div className="message-html" dangerouslySetInnerHTML={{ __html: safeHtml }} /> : <p>{messageData.message.text_body || "This email does not have a safe text version to display."}</p>}</div>
                       {messageData.message.attachments.length ? <div className="attachments"><strong>Attachments</strong>{messageData.message.attachments.map((attachment) => <span key={attachment.id}>{attachment.filename || "Unnamed file"} · {formatFileSize(attachment.size_bytes)}</span>)}</div> : null}
                     </div>
                   )}
-                  <footer className="message-safety"><ShieldCheck aria-hidden="true" /> HTML, external images, and trackers are not rendered</footer>
+                  <footer className="message-safety"><ShieldCheck aria-hidden="true" /> HTML is sanitized: scripts, external images, and trackers are blocked.</footer>
                 </>
               ) : (
                 <div className="empty-message"><span><Mail aria-hidden="true" /></span><h2>No email yet</h2><p>Use the address above. Incoming email appears automatically without reloading the page.</p><button className="secondary-button" type="button" onClick={copyAddress}>{copied ? "Address copied" : "Copy address"}</button></div>
               )}
             </article>
           </section>
+          )}
         </>
       )}
 
       {mode === "generator" ? <HomepageSeo /> : null}
-      {mode === "generator" ? <footer className="site-footer"><span translate="no">MailTemps.space / receive only</span><span>Inboxes and messages are deleted automatically after expiry.</span></footer> : null}
+      {mode === "generator" ? <footer className="site-footer"><span translate="no">MailTemps.space / temporary mail</span><span>Inboxes and messages are deleted automatically after expiry.</span></footer> : null}
+      {composeOpen ? (
+        <div className="confirm-overlay">
+          <div
+            className="compose-dialog"
+            ref={composeDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="compose-title"
+            tabIndex={-1}
+          >
+            <button className="confirm-close" type="button" onClick={() => setComposeOpen(false)} aria-label="Tutup form kirim">
+              <X aria-hidden="true" />
+            </button>
+            <div className="compose-head">
+              <p className="eyebrow">From {inboxAddress}</p>
+              <h2 id="compose-title">New message</h2>
+            </div>
+            <form className="compose-form" onSubmit={sendEmail}>
+              <label htmlFor="compose-to">To</label>
+              <div className="name-input-row">
+                <input id="compose-to" type="email" value={composeTo} onChange={(event) => setComposeTo(event.target.value)} placeholder="friend@example.com" autoComplete="off" spellCheck={false} required />
+              </div>
+              <label htmlFor="compose-subject">Subject</label>
+              <div className="name-input-row">
+                <input id="compose-subject" value={composeSubject} onChange={(event) => setComposeSubject(event.target.value)} maxLength={200} placeholder="Subject" autoComplete="off" required />
+              </div>
+              <label htmlFor="compose-body">Message</label>
+              <textarea id="compose-body" value={composeBody} onChange={(event) => setComposeBody(event.target.value)} rows={7} maxLength={16000} placeholder="Write your message…" required />
+              <p className="field-hint">Plain text only · one recipient · outgoing mail is rate limited.</p>
+              <button className="primary-button create-button" type="submit" disabled={sending || actionPending}>
+                <Send aria-hidden="true" /> {sending ? "Sending…" : "Send email"}
+              </button>
+              {TURNSTILE_SITE_KEY ? <div className="turnstile-wrap" ref={composeTurnstileRef} /> : null}
+              {composeError ? <p className="form-error" role="alert">{composeError}</p> : null}
+            </form>
+          </div>
+        </div>
+      ) : null}
       {confirmMode ? (
         <div className="confirm-overlay">
           <div
@@ -559,8 +831,19 @@ export default function MailtempsApp({ mode, version = 0 }: MailtempsAppProps) {
           </div>
         </div>
       ) : null}
-      <div className={`toast ${toastMessage ? "is-visible" : ""}`} role="status" aria-live="polite">
-        {toastMessage ? <><span className="toast-check"><CircleCheckBig aria-hidden="true" /></span><span>{toastMessage}</span></> : null}
+      <div
+        className={`toast ${toast ? "is-visible" : ""} ${toast?.tone === "error" ? "is-error" : ""}`}
+        role={toast?.tone === "error" ? "alert" : "status"}
+        aria-live={toast?.tone === "error" ? "assertive" : "polite"}
+      >
+        {toast ? (
+          <>
+            <span className={`toast-check ${toast.tone === "error" ? "is-error" : ""}`}>
+              {toast.tone === "error" ? <X aria-hidden="true" /> : <CircleCheckBig aria-hidden="true" />}
+            </span>
+            <span>{toast.message}</span>
+          </>
+        ) : null}
       </div>
     </main>
   );

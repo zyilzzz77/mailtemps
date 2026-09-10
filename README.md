@@ -1,6 +1,6 @@
 # Mailtemps.space
 
-Temporary inbox receive-only dengan Next.js, Go, PostgreSQL, Redis, Caddy, dan Docker Compose.
+Temporary inbox dengan Next.js, Go, PostgreSQL, Redis, Caddy, dan Docker Compose. Bisa menerima email masuk dan mengirim email keluar (teks polos) dari alamat sementara.
 
 Alamat dibuat dengan format tanpa separator:
 
@@ -78,6 +78,27 @@ Setelah membuat inbox lewat UI, kirim email ke alamat tersebut melalui port deve
 swaks --server localhost:2525 --from sender@example.com --to ALAMAT_DARI_UI --header "Subject: Tes SMTP" --body "Pesan sudah masuk."
 ```
 
+## Kirim email keluar
+
+Tab **Compose** di halaman inbox mengirim email teks polos langsung ke MX server penerima (direct-to-MX, port 25). Tidak ada relay/smarthost. Batasannya: 1 penerima, teks polos tanpa attachment, wajib Turnstile tiap kirim, maksimum `SEND_PER_INBOX_LIMIT` (default 5) per inbox dan `SEND_GLOBAL_DAILY_LIMIT` (default 50) per 24 jam.
+
+Agar email sampai ke Gmail/Outlook, semua ini wajib ada:
+
+```dns
+mailtemps.space.                TXT   "v=spf1 mx ip4:142.248.82.88 -all"
+mail._domainkey.mailtemps.space. TXT  "v=DKIM1; k=rsa; p=<kunci publik dari deploy/dkim/mail.public.pem>"
+_dmarc.mailtemps.space.         TXT   "v=DMARC1; p=none; rua=mailto:admin@mailtemps.space"
+```
+
+- **PTR/rDNS** `142.248.82.88` → `mx.mailtemps.space`, diatur di panel provider VPS (tidak bisa dari kode).
+- **Egress TCP/25** harus terbuka. Banyak provider VPS memblokirnya secara default dan harus diajukan ke support. Cek dengan `nc -vz gmail-smtp-in.l.google.com 25`.
+- `deploy/production.sh` membuat kunci DKIM di `deploy/dkim/` (gitignored), mengisi `DKIM_PRIVATE_KEY_B64` di `.env`, dan mencetak checklist DNS di akhir deploy.
+- Mulai dari DMARC `p=none` untuk memantau, baru naikkan ke `quarantine`/`reject` setelah laporan bersih.
+
+Variabel terkait: `OUTBOUND_ENABLED`, `HELO_HOSTNAME`, `DKIM_SELECTOR`, `DKIM_PRIVATE_KEY_B64`, `SEND_PER_INBOX_LIMIT`, `SEND_GLOBAL_DAILY_LIMIT`, `SEND_TIMEOUT`.
+
+Catatan lokal: mengirim dari Windows lokal hampir selalu gagal karena ISP memblokir egress port 25 dan tidak ada PTR. Yang bisa diuji lokal adalah unit test `internal/mailsender` dengan SMTP server palsu.
+
 ## Deployment pada server dengan Caddy yang sudah aktif
 
 Cara termudah: jalankan `deploy/production.sh` di server (VPS `142.248.82.88`).
@@ -133,6 +154,7 @@ docker compose config
 
 - API menyimpan hash access token, bukan token plaintext.
 - PostgreSQL dan Redis hanya berada dalam private Docker network.
-- SMTP menerima satu recipient aktif pada domain `mailtemps.space` dan tidak menyediakan relay.
-- HTML email disimpan tetapi tidak dirender oleh frontend; UI hanya menampilkan versi teks aman.
+- SMTP menerima satu recipient aktif pada domain `mailtemps.space` dan tidak menyediakan relay terbuka.
+- Email keluar dibatasi: 1 penerima, teks polos, wajib Turnstile, dengan batas per-inbox dan batas harian global.
+- HTML email masuk disimpan tetapi tidak dirender oleh frontend; UI hanya menampilkan versi teks aman.
 - Attachment baru disimpan sebagai metadata. Penyimpanan object dan malware scanning adalah tahap hardening berikutnya.

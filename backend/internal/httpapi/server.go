@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -28,6 +29,7 @@ import (
 
 	"mailtemps.space/backend/internal/config"
 	database "mailtemps.space/backend/internal/database/generated"
+	"mailtemps.space/backend/internal/mailsender"
 	"mailtemps.space/backend/internal/ratelimit"
 )
 
@@ -37,6 +39,7 @@ type Server struct {
 	queries *database.Queries
 	redis   *redis.Client
 	limiter *ratelimit.Limiter
+	sender  mailsender.Sender
 	log     *slog.Logger
 }
 
@@ -53,8 +56,11 @@ type messageSummary struct {
 	ID            uuid.UUID `json:"id"`
 	SenderName    string    `json:"sender_name"`
 	SenderAddress string    `json:"sender_address"`
+	Recipients    []string  `json:"recipients"`
 	Subject       string    `json:"subject"`
 	Preview       string    `json:"preview"`
+	Status        string    `json:"status"`
+	ErrorMessage  string    `json:"error_message"`
 	ReceivedAt    time.Time `json:"received_at"`
 }
 
@@ -66,6 +72,7 @@ type messageView struct {
 	Recipients        []string         `json:"recipients"`
 	Subject           string           `json:"subject"`
 	TextBody          string           `json:"text_body"`
+	HtmlBody          string           `json:"html_body"`
 	ReceivedAt        time.Time        `json:"received_at"`
 	Attachments       []attachmentView `json:"attachments"`
 }
@@ -77,15 +84,21 @@ type attachmentView struct {
 	SizeBytes   int64     `json:"size_bytes"`
 }
 
-func New(cfg config.Config, pool *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logger) *Server {
-	return &Server{
+func New(cfg config.Config, pool *pgxpool.Pool, redisClient *redis.Client, sender mailsender.Sender, logger *slog.Logger) *Server {
+	server := &Server{
 		cfg:     cfg,
 		pool:    pool,
 		queries: database.New(pool),
 		redis:   redisClient,
-		limiter: ratelimit.New(redisClient, cfg.CreateRateLimit),
 		log:     logger,
 	}
+	if redisClient != nil {
+		server.limiter = ratelimit.New(redisClient, cfg.CreateRateLimit, cfg.CreateRateWindow)
+	}
+	if cfg.OutboundEnabled {
+		server.sender = sender
+	}
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
@@ -93,7 +106,7 @@ func (s *Server) Handler() http.Handler {
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Recoverer)
-	router.Use(middleware.Timeout(12 * time.Second))
+	router.Use(middleware.Timeout(30 * time.Second))
 	router.Use(s.cors)
 
 	router.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -103,6 +116,7 @@ func (s *Server) Handler() http.Handler {
 
 	router.Route("/api/v1", func(r chi.Router) {
 		r.Post("/inboxes", s.createInbox)
+		r.Post("/inboxes/{inboxID}/messages", s.sendMessage)
 		r.Get("/inboxes/{inboxID}", s.getInbox)
 		r.Patch("/inboxes/{inboxID}/extend", s.extendInbox)
 		r.Post("/inboxes/{inboxID}/rotate", s.rotateInbox)
@@ -129,23 +143,41 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func (s *Server) createInbox(w http.ResponseWriter, r *http.Request) {
+func (s *Server) allowCreate(w http.ResponseWriter, r *http.Request) bool {
 	allowed, err := s.limiter.Allow(r.Context(), clientIP(r))
 	if err != nil {
 		s.log.Warn("rate limiter unavailable", "error", err)
 	}
 	if !allowed {
-		w.Header().Set("Retry-After", "60")
+		retryAfter := int64(s.cfg.CreateRateWindow / time.Second)
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
 		writeError(w, http.StatusTooManyRequests, "terlalu banyak alamat baru; coba lagi sebentar")
+		return false
+	}
+	return true
+}
+
+func (s *Server) createInbox(w http.ResponseWriter, r *http.Request) {
+	if !s.allowCreate(w, r) {
 		return
 	}
 
 	var input struct {
-		Name string `json:"name"`
+		Name           string `json:"name"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil && !errors.Is(err, context.Canceled) {
 		writeError(w, http.StatusBadRequest, "body JSON tidak valid")
+		return
+	}
+
+	if err := s.verifyTurnstile(r.Context(), input.TurnstileToken, clientIP(r)); err != nil {
+		s.log.Warn("turnstile verification failed", "error", err)
+		writeError(w, http.StatusBadRequest, "verifikasi keamanan gagal; muat ulang halaman lalu coba lagi")
 		return
 	}
 
@@ -213,10 +245,29 @@ func (s *Server) getInbox(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		messages = append(messages, messageSummary{
 			ID: row.ID, SenderName: row.SenderName, SenderAddress: row.SenderAddress,
-			Subject: row.Subject, Preview: strings.TrimSpace(row.TextBody), ReceivedAt: row.ReceivedAt.Time,
+			Recipients: row.Recipients, Subject: row.Subject,
+			Preview: strings.TrimSpace(row.TextBody), Status: row.Status,
+			ErrorMessage: row.ErrorMessage, ReceivedAt: row.ReceivedAt.Time,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"inbox": toInboxView(inbox), "messages": messages})
+
+	sentRows, err := s.queries.ListOutboundMessagesByInbox(r.Context(), database.ListOutboundMessagesByInboxParams{InboxID: inbox.ID, Limit: 100})
+	if err != nil {
+		s.log.Error("list outbound messages", "error", err)
+		writeError(w, http.StatusInternalServerError, "pesan terkirim belum dapat dimuat")
+		return
+	}
+	sent := make([]messageSummary, 0, len(sentRows))
+	for _, row := range sentRows {
+		sent = append(sent, messageSummary{
+			ID: row.ID, SenderName: row.SenderName, SenderAddress: row.SenderAddress,
+			Recipients: row.Recipients, Subject: row.Subject,
+			Preview: strings.TrimSpace(row.TextBody), Status: row.Status,
+			ErrorMessage: row.ErrorMessage, ReceivedAt: row.ReceivedAt.Time,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"inbox": toInboxView(inbox), "messages": messages, "sent": sent})
 }
 
 func (s *Server) extendInbox(w http.ResponseWriter, r *http.Request) {
@@ -255,6 +306,9 @@ func (s *Server) extendInbox(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rotateInbox(w http.ResponseWriter, r *http.Request) {
 	current, ok := s.authorizeInbox(w, r)
 	if !ok {
+		return
+	}
+	if !s.allowCreate(w, r) {
 		return
 	}
 
@@ -361,7 +415,7 @@ func (s *Server) getMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"message": messageView{
 		ID: message.ID, InternetMessageID: message.InternetMessageID, SenderName: message.SenderName,
 		SenderAddress: message.SenderAddress, Recipients: message.Recipients, Subject: message.Subject,
-		TextBody: message.TextBody, ReceivedAt: message.ReceivedAt.Time, Attachments: items,
+		TextBody: message.TextBody, HtmlBody: message.HtmlBody, ReceivedAt: message.ReceivedAt.Time, Attachments: items,
 	}})
 }
 

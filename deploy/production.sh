@@ -8,9 +8,11 @@
 #   2. generate .env (password acak) jika belum ada
 #   3. build + jalankan full stack: postgres, redis, api, smtp, worker, web
 #   4. migrasi database (idempotent via tabel schema_migrations)
-#   5. smoke test: readyz + create inbox + homepage
-#   6. pasang blok Caddy mailtemps.space di Caddyfile host (backup + validate + reload)
-#   7. buka port 25 untuk SMTP
+#   5. generate kunci DKIM + pastikan env pengiriman keluar ada di .env
+#   6. smoke test: readyz + create inbox + homepage
+#   7. pasang blok Caddy mailtemps.space di Caddyfile host (backup + validate + reload)
+#   8. buka port 25 untuk SMTP + cek egress port 25
+#   9. cetak checklist DNS pengiriman keluar (SPF, DKIM, DMARC, PTR)
 #
 # Usage:
 #   bash deploy/production.sh            # deploy penuh / update
@@ -71,6 +73,11 @@ CLEANUP_INTERVAL=1m
 MAX_MESSAGE_BYTES=10485760
 CREATE_RATE_LIMIT=10
 TRUSTED_ORIGINS=http://localhost:3000,http://localhost:3001,https://mailtemps.space
+OUTBOUND_ENABLED=true
+HELO_HOSTNAME=mx.mailtemps.space
+DKIM_SELECTOR=mail
+SEND_PER_INBOX_LIMIT=5
+SEND_GLOBAL_DAILY_LIMIT=50
 POSTGRES_DB=mailtemps
 POSTGRES_USER=mailtemps
 POSTGRES_PASSWORD=${PG_PASS}
@@ -81,6 +88,41 @@ SMTP_PUBLIC_PORT=25
 EOF
   chmod 600 .env
   log ".env dibuat dengan password acak"
+fi
+
+ensure_env() {
+  local key="$1" value="$2"
+  if ! grep -qE "^${key}=" .env; then
+    printf '%s=%s\n' "$key" "$value" >> .env
+    log ".env: tambah $key"
+  fi
+}
+
+log "pastikan env pengiriman keluar ada"
+ensure_env OUTBOUND_ENABLED true
+ensure_env HELO_HOSTNAME "mx.${MAIL_DOMAIN:-mailtemps.space}"
+ensure_env DKIM_SELECTOR mail
+ensure_env SEND_PER_INBOX_LIMIT 5
+ensure_env SEND_GLOBAL_DAILY_LIMIT 50
+
+DKIM_DIR="$APP_DIR/deploy/dkim"
+DKIM_KEY="$DKIM_DIR/mail.private.pem"
+DKIM_PUB="$DKIM_DIR/mail.public.pem"
+if [ ! -f "$DKIM_KEY" ]; then
+  if command -v openssl >/dev/null 2>&1; then
+    mkdir -p "$DKIM_DIR"
+    openssl genrsa -out "$DKIM_KEY" 2048 2>/dev/null
+    openssl rsa -in "$DKIM_KEY" -pubout -out "$DKIM_PUB" 2>/dev/null
+    chmod 600 "$DKIM_KEY"
+    log "kunci DKIM dibuat di $DKIM_DIR"
+  else
+    log "PERINGATAN: openssl tidak ada — DKIM dilewati, email keluar akan dikirim tanpa tanda tangan"
+  fi
+fi
+if [ -f "$DKIM_KEY" ] && ! grep -qE '^DKIM_PRIVATE_KEY_B64=' .env; then
+  DKIM_B64="$(base64 -w0 "$DKIM_KEY" 2>/dev/null || base64 "$DKIM_KEY" | tr -d '\n')"
+  printf 'DKIM_PRIVATE_KEY_B64=%s\n' "$DKIM_B64" >> .env
+  log ".env: DKIM_PRIVATE_KEY_B64 diisi"
 fi
 
 log "build + jalankan stack"
@@ -195,6 +237,27 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
     log "ufw: 25/tcp sudah terbuka"
   fi
 fi
+
+log "cek egress port 25 (syarat pengiriman keluar)"
+if timeout 8 bash -c 'cat < /dev/null > /dev/tcp/gmail-smtp-in.l.google.com/25' 2>/dev/null; then
+  log "egress port 25 OK"
+else
+  log "PERINGATAN: egress port 25 TIDAK tembus."
+  log "  Banyak provider VPS memblokir TCP/25 keluar. Ajukan pembukaan lewat support provider,"
+  log "  atau pengiriman keluar ke Gmail/Outlook tidak akan pernah berhasil."
+fi
+
+log "checklist DNS pengiriman keluar (pasang manual di Cloudflare):"
+log "  SPF    : mailtemps.space. TXT \"v=spf1 mx ip4:142.248.82.88 -all\""
+log "  DMARC  : _dmarc.mailtemps.space. TXT \"v=DMARC1; p=none; rua=mailto:admin@mailtemps.space\""
+if [ -f "$DKIM_PUB" ]; then
+  DKIM_TXT="$(grep -v -- '-----' "$DKIM_PUB" | tr -d '\n')"
+  log "  DKIM   : mail._domainkey.mailtemps.space. TXT \"v=DKIM1; k=rsa; p=${DKIM_TXT}\""
+else
+  log "  DKIM   : kunci publik belum ada (openssl tidak tersedia saat deploy)"
+fi
+log "  PTR    : set reverse DNS 142.248.82.88 -> mx.mailtemps.space di panel provider VPS"
+log "  Verifikasi setelah semua terpasang: https://www.mail-tester.com/"
 
 log "=== deploy selesai ==="
 $COMPOSE ps

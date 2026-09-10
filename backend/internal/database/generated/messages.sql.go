@@ -12,6 +12,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countOutboundByInboxSince = `-- name: CountOutboundByInboxSince :one
+SELECT count(*) FROM messages
+WHERE inbox_id = $1 AND direction = 'outbound' AND received_at >= $2
+`
+
+type CountOutboundByInboxSinceParams struct {
+	InboxID    uuid.UUID          `json:"inbox_id"`
+	ReceivedAt pgtype.Timestamptz `json:"received_at"`
+}
+
+func (q *Queries) CountOutboundByInboxSince(ctx context.Context, arg CountOutboundByInboxSinceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOutboundByInboxSince, arg.InboxID, arg.ReceivedAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countOutboundSince = `-- name: CountOutboundSince :one
+SELECT count(*) FROM messages
+WHERE direction = 'outbound' AND received_at >= $1
+`
+
+func (q *Queries) CountOutboundSince(ctx context.Context, receivedAt pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countOutboundSince, receivedAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAttachment = `-- name: CreateAttachment :one
 INSERT INTO attachments (message_id, filename, content_type, size_bytes, storage_key)
 VALUES ($1, $2, $3, $4, $5)
@@ -53,7 +82,7 @@ INSERT INTO messages (
     subject, text_body, html_body, raw_size_bytes
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, inbox_id, internet_message_id, sender_name, sender_address, recipients, subject, text_body, html_body, raw_size_bytes, received_at
+RETURNING id, inbox_id, internet_message_id, sender_name, sender_address, recipients, subject, text_body, html_body, raw_size_bytes, received_at, direction, status, error_message
 `
 
 type CreateMessageParams struct {
@@ -93,6 +122,58 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (M
 		&i.HtmlBody,
 		&i.RawSizeBytes,
 		&i.ReceivedAt,
+		&i.Direction,
+		&i.Status,
+		&i.ErrorMessage,
+	)
+	return i, err
+}
+
+const createOutboundMessage = `-- name: CreateOutboundMessage :one
+INSERT INTO messages (
+    inbox_id, internet_message_id, sender_name, sender_address, recipients,
+    subject, text_body, html_body, raw_size_bytes, direction, status
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, '', 0, 'outbound', 'queued')
+RETURNING id, inbox_id, internet_message_id, sender_name, sender_address, recipients, subject, text_body, html_body, raw_size_bytes, received_at, direction, status, error_message
+`
+
+type CreateOutboundMessageParams struct {
+	InboxID           uuid.UUID `json:"inbox_id"`
+	InternetMessageID string    `json:"internet_message_id"`
+	SenderName        string    `json:"sender_name"`
+	SenderAddress     string    `json:"sender_address"`
+	Recipients        []string  `json:"recipients"`
+	Subject           string    `json:"subject"`
+	TextBody          string    `json:"text_body"`
+}
+
+func (q *Queries) CreateOutboundMessage(ctx context.Context, arg CreateOutboundMessageParams) (Message, error) {
+	row := q.db.QueryRow(ctx, createOutboundMessage,
+		arg.InboxID,
+		arg.InternetMessageID,
+		arg.SenderName,
+		arg.SenderAddress,
+		arg.Recipients,
+		arg.Subject,
+		arg.TextBody,
+	)
+	var i Message
+	err := row.Scan(
+		&i.ID,
+		&i.InboxID,
+		&i.InternetMessageID,
+		&i.SenderName,
+		&i.SenderAddress,
+		&i.Recipients,
+		&i.Subject,
+		&i.TextBody,
+		&i.HtmlBody,
+		&i.RawSizeBytes,
+		&i.ReceivedAt,
+		&i.Direction,
+		&i.Status,
+		&i.ErrorMessage,
 	)
 	return i, err
 }
@@ -115,7 +196,7 @@ func (q *Queries) DeleteMessage(ctx context.Context, arg DeleteMessageParams) (i
 }
 
 const getMessageByID = `-- name: GetMessageByID :one
-SELECT id, inbox_id, internet_message_id, sender_name, sender_address, recipients, subject, text_body, html_body, raw_size_bytes, received_at FROM messages
+SELECT id, inbox_id, internet_message_id, sender_name, sender_address, recipients, subject, text_body, html_body, raw_size_bytes, received_at, direction, status, error_message FROM messages
 WHERE id = $1 AND inbox_id = $2
 LIMIT 1
 `
@@ -140,6 +221,9 @@ func (q *Queries) GetMessageByID(ctx context.Context, arg GetMessageByIDParams) 
 		&i.HtmlBody,
 		&i.RawSizeBytes,
 		&i.ReceivedAt,
+		&i.Direction,
+		&i.Status,
+		&i.ErrorMessage,
 	)
 	return i, err
 }
@@ -179,9 +263,10 @@ func (q *Queries) ListAttachmentsByMessage(ctx context.Context, messageID uuid.U
 const listMessagesByInbox = `-- name: ListMessagesByInbox :many
 SELECT id, inbox_id, internet_message_id, sender_name, sender_address,
        recipients, subject, left(text_body, 180)::text AS text_body,
-       ''::text AS html_body, raw_size_bytes, received_at
+       ''::text AS html_body, raw_size_bytes, received_at,
+       direction, status, error_message
 FROM messages
-WHERE inbox_id = $1
+WHERE inbox_id = $1 AND direction = 'inbound'
 ORDER BY received_at DESC
 LIMIT $2
 `
@@ -203,6 +288,9 @@ type ListMessagesByInboxRow struct {
 	HtmlBody          string             `json:"html_body"`
 	RawSizeBytes      int64              `json:"raw_size_bytes"`
 	ReceivedAt        pgtype.Timestamptz `json:"received_at"`
+	Direction         string             `json:"direction"`
+	Status            string             `json:"status"`
+	ErrorMessage      string             `json:"error_message"`
 }
 
 func (q *Queries) ListMessagesByInbox(ctx context.Context, arg ListMessagesByInboxParams) ([]ListMessagesByInboxRow, error) {
@@ -226,6 +314,9 @@ func (q *Queries) ListMessagesByInbox(ctx context.Context, arg ListMessagesByInb
 			&i.HtmlBody,
 			&i.RawSizeBytes,
 			&i.ReceivedAt,
+			&i.Direction,
+			&i.Status,
+			&i.ErrorMessage,
 		); err != nil {
 			return nil, err
 		}
@@ -235,4 +326,89 @@ func (q *Queries) ListMessagesByInbox(ctx context.Context, arg ListMessagesByInb
 		return nil, err
 	}
 	return items, nil
+}
+
+const listOutboundMessagesByInbox = `-- name: ListOutboundMessagesByInbox :many
+SELECT id, inbox_id, internet_message_id, sender_name, sender_address,
+       recipients, subject, left(text_body, 180)::text AS text_body,
+       ''::text AS html_body, raw_size_bytes, received_at,
+       direction, status, error_message
+FROM messages
+WHERE inbox_id = $1 AND direction = 'outbound'
+ORDER BY received_at DESC
+LIMIT $2
+`
+
+type ListOutboundMessagesByInboxParams struct {
+	InboxID uuid.UUID `json:"inbox_id"`
+	Limit   int32     `json:"limit"`
+}
+
+type ListOutboundMessagesByInboxRow struct {
+	ID                uuid.UUID          `json:"id"`
+	InboxID           uuid.UUID          `json:"inbox_id"`
+	InternetMessageID string             `json:"internet_message_id"`
+	SenderName        string             `json:"sender_name"`
+	SenderAddress     string             `json:"sender_address"`
+	Recipients        []string           `json:"recipients"`
+	Subject           string             `json:"subject"`
+	TextBody          string             `json:"text_body"`
+	HtmlBody          string             `json:"html_body"`
+	RawSizeBytes      int64              `json:"raw_size_bytes"`
+	ReceivedAt        pgtype.Timestamptz `json:"received_at"`
+	Direction         string             `json:"direction"`
+	Status            string             `json:"status"`
+	ErrorMessage      string             `json:"error_message"`
+}
+
+func (q *Queries) ListOutboundMessagesByInbox(ctx context.Context, arg ListOutboundMessagesByInboxParams) ([]ListOutboundMessagesByInboxRow, error) {
+	rows, err := q.db.Query(ctx, listOutboundMessagesByInbox, arg.InboxID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOutboundMessagesByInboxRow{}
+	for rows.Next() {
+		var i ListOutboundMessagesByInboxRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InboxID,
+			&i.InternetMessageID,
+			&i.SenderName,
+			&i.SenderAddress,
+			&i.Recipients,
+			&i.Subject,
+			&i.TextBody,
+			&i.HtmlBody,
+			&i.RawSizeBytes,
+			&i.ReceivedAt,
+			&i.Direction,
+			&i.Status,
+			&i.ErrorMessage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateMessageStatus = `-- name: UpdateMessageStatus :exec
+UPDATE messages
+SET status = $2, error_message = $3
+WHERE id = $1
+`
+
+type UpdateMessageStatusParams struct {
+	ID           uuid.UUID `json:"id"`
+	Status       string    `json:"status"`
+	ErrorMessage string    `json:"error_message"`
+}
+
+func (q *Queries) UpdateMessageStatus(ctx context.Context, arg UpdateMessageStatusParams) error {
+	_, err := q.db.Exec(ctx, updateMessageStatus, arg.ID, arg.Status, arg.ErrorMessage)
+	return err
 }

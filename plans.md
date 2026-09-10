@@ -12,7 +12,7 @@ Dokumen ini adalah kontrak teknis sekaligus checklist eksekusi untuk membangun l
 - Inbox memiliki access token rahasia dan masa aktif awal 10 menit.
 - Pengguna dapat melihat, menyegarkan, memperpanjang, dan menghapus inbox/pesan.
 - Email, attachment, dan inbox kedaluwarsa dihapus otomatis.
-- Layanan bersifat receive-only; tidak menyediakan pengiriman email keluar.
+- Pengiriman email keluar (teks polos) langsung ke MX penerima; relay/smarthost tidak dipakai.
 
 ## 2. Arsitektur
 
@@ -69,15 +69,25 @@ Redis      <-- go-redis      --> rate limiter + event signal
 - [x] `DELETE /api/v1/inboxes/{id}` menghapus inbox.
 - [x] `GET /api/v1/inboxes/{id}/messages/{message_id}` mengambil detail pesan.
 - [x] `DELETE /api/v1/inboxes/{id}/messages/{message_id}` menghapus pesan.
+- [x] `POST /api/v1/inboxes/{id}/messages` mengirim email keluar dari alamat inbox.
 - [x] Bearer token di-hash SHA-256 sebelum disimpan.
 - [x] Rate limit pembuatan inbox memakai Redis dan IP klien.
+- [x] Pengiriman keluar wajib Turnstile dan dibatasi per-inbox serta global harian lewat database (tetap aktif tanpa Redis).
 - [x] CORS hanya untuk development; production menggunakan same-origin lewat Caddy.
+
+### SMTP sender — Go
+
+- [x] Resolve MX domain penerima lalu kirim langsung ke port 25 (direct-to-MX), dengan fallback ke MX berikutnya.
+- [x] Pesan teks polos, 1 penerima, quoted-printable, dan Message-ID acak.
+- [x] Tanda tangan DKIM saat `DKIM_PRIVATE_KEY_B64` tersedia.
+- [x] Validasi input menolak header injection, alamat tidak valid, dan domain sendiri.
+- [x] Status kirim (`queued`/`sent`/`failed`) dan pesan error disimpan di tabel `messages`.
 
 ### SMTP receiver — Go
 
 - [x] Listen pada `:2525` di container; host production memetakan TCP `25:2525`.
 - [x] Hanya menerima recipient `@mailtemps.space` yang inbox-nya aktif.
-- [x] Tidak mendukung relay atau pengiriman keluar.
+- [x] Tidak menjadi open relay: hanya recipient `@mailtemps.space` yang diterima dari internet.
 - [x] Batasi ukuran pesan, jumlah recipient, dan durasi koneksi.
 - [x] Parse header, text/plain, text/html, serta metadata attachment.
 - [x] Sanitasi HTML dilakukan saat ditampilkan; raw HTML tidak dirender langsung.
@@ -148,7 +158,7 @@ mailtemps.space.      MX 10 mx.mailtemps.space.
 
 - `mx.mailtemps.space` harus DNS-only jika memakai Cloudflare proxy biasa.
 - Firewall publik: TCP 80/443 ke Caddy dan TCP 25 ke SMTP receiver.
-- Port 587/465, IMAP, dan POP3 tidak dibuka karena produk receive-only berbasis web.
+- Port 587/465, IMAP, dan POP3 tidak dibuka; pengiriman keluar memakai egress TCP/25 langsung ke MX penerima.
 
 ## 6. Environment
 
@@ -157,6 +167,7 @@ mailtemps.space.      MX 10 mx.mailtemps.space.
 - [x] `INBOX_TTL=10m`, `MAX_INBOX_TTL=30m`.
 - [x] `DATABASE_URL` hanya tersedia bagi service Go.
 - [x] `REDIS_ADDR` hanya menunjuk private Compose network.
+- [x] `OUTBOUND_ENABLED`, `HELO_HOSTNAME`, `DKIM_SELECTOR`, `DKIM_PRIVATE_KEY_B64`, `SEND_PER_INBOX_LIMIT`, `SEND_GLOBAL_DAILY_LIMIT`, `SEND_TIMEOUT`.
 - [ ] Production secrets wajib diganti sebelum deploy.
 
 ## 7. Security baseline

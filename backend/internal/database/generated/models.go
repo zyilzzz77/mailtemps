@@ -41,4 +41,7 @@ type Message struct {
 	HtmlBody          string             `json:"html_body"`
 	RawSizeBytes      int64              `json:"raw_size_bytes"`
 	ReceivedAt        pgtype.Timestamptz `json:"received_at"`
+	Direction         string             `json:"direction"`
+	Status            string             `json:"status"`
+	ErrorMessage      string             `json:"error_message"`
 }

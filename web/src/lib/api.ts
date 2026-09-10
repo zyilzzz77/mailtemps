@@ -11,8 +11,11 @@ export type MessageSummary = {
   id: string;
   sender_name: string;
   sender_address: string;
+  recipients: string[];
   subject: string;
   preview: string;
+  status: string;
+  error_message: string;
   received_at: string;
 };
 
@@ -31,6 +34,7 @@ export type Message = {
   recipients: string[];
   subject: string;
   text_body: string;
+  html_body: string;
   received_at: string;
   attachments: Attachment[];
 };
@@ -38,10 +42,20 @@ export type Message = {
 export type InboxPayload = {
   inbox: Inbox;
   messages: MessageSummary[];
+  sent: MessageSummary[];
   access_token?: string;
 };
 
 export type MessagePayload = { message: Message };
+
+export type SendMessageInput = {
+  to: string;
+  subject: string;
+  body: string;
+  turnstile_token: string;
+};
+
+export type SendMessagePayload = { message: MessageSummary };
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -62,4 +76,15 @@ export async function apiRequest<T>(path: string, token?: string, init?: Request
     throw new ApiError(response.status, payload?.error?.message ?? "Layanan belum dapat memproses permintaan.");
   }
   return payload as T;
+}
+
+export async function sendInboxMessage(
+  inboxId: string,
+  token: string,
+  input: SendMessageInput,
+): Promise<SendMessagePayload> {
+  return apiRequest<SendMessagePayload>(`/api/v1/inboxes/${inboxId}/messages`, token, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }

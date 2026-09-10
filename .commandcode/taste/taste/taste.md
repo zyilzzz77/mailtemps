@@ -1,0 +1,18 @@
+# Taste
+- Prefers communication in Bahasa Indonesia (casual/informal). Confidence: 0.9
+- Prefers isolated, dedicated Docker dependencies per project (separate Postgres/Redis) locally and in production over sharing DBs with other projects. Confidence: 0.75
+- Prefers single-script automated production deploy/update (e.g., production.sh) covering full stack: docker, Caddy reverse proxy with TLS, Redis, DB/migrations, and smoke checks. Confidence: 0.8
+- Is protective of their production servers and other projects: don't touch, modify, or even inspect another project's files/config (e.g., a different project's Caddyfile) without explicit permission first. Confidence: 0.85
+- Prefers a to-do/plan list up front before multi-step work (e.g., deployment) begins. Confidence: 0.7
+- Prefers autonomous end-to-end execution: once given the go-ahead, run through to completion (deploy to live) rather than pausing for per-step approval. Confidence: 0.65
+- Gets impatient with long-running operations; prefers quick/frequent progress feedback and explicit time estimates (asks "how long") over lengthy waits. Confidence: 0.7
+- Prefers hands-on execution for deployment: wants explicit step-by-step commands to run himself (reusing the existing production.sh) rather than relying on the agent to execute remotely, especially when remote automation is slow/flaky. Confidence: 0.7
+- Shell environment has `NODE_ENV=production` set, which makes npm silently skip devDependencies on install; use `npm install --include=dev` (or unset NODE_ENV) when full installs are needed. Confidence: 0.8
+- Prefers HTML email content to render as sanitized rich HTML with clickable links/buttons, not degraded to plain-text-only. Confidence: 0.7
+- Prioritizes backend security/anti-abuse hardening for public-facing features (e.g., per-IP rate limiting on create endpoints, captcha per action, per-user and global daily caps). Confidence: 0.75
+- For local dev of third-party integrations (e.g., Cloudflare Turnstile), prefers using the provider's official test/sandbox keys over editing production dashboard settings (hostname allowlists) or disabling the integration. Confidence: 0.65
+- Prefers a lightweight local run: runs the full stack natively on Windows without Docker — native PostgreSQL 16, Redis absent (backend falls back to dev mode) — via `go run ./cmd/api|smtp|worker` and `npm run dev`, avoiding docker-compose builds locally. Confidence: 0.7
+- Prefers keeping a feature's first version minimal in scope (chose plain-text-only sending, no attachments/HTML) to ship sooner. Confidence: 0.55
+- Prefers self-hosted / no-third-party-dependency solutions over external service providers (chose direct-to-MX sending instead of a relay provider). Confidence: 0.5
+- Prefers minimal/simple UI: secondary actions (e.g., Compose) should open as a modal popup rather than navigating to a separate page/tab. Confidence: 0.65
+- Wants explicit visual success/failure feedback for user actions (e.g., toast notifications in a corner: green check on success, red X on failure). Confidence: 0.6

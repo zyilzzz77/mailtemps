@@ -178,11 +178,18 @@ for _ in $(seq 1 90); do
 done
 [ "$code" = "200" ] || { $COMPOSE logs --tail=50 api; die "api tidak siap (readyz=$code)"; }
 
-log "smoke test: buat inbox sementara"
+log "smoke test: endpoint buat inbox"
 CREATE="$(curl -s -m 10 -X POST http://127.0.0.1:8081/api/v1/inboxes \
   -H 'Content-Type: application/json' -d '{"name":"smoke"}')"
-echo "$CREATE" | grep -q '"address"' || { $COMPOSE logs --tail=50 api; die "smoke gagal: $CREATE"; }
-log "smoke OK: $(echo "$CREATE" | grep -o '"address":"[^"]*"' | head -1)"
+if [ -n "$(grep '^TURNSTILE_SECRET_KEY=' .env | cut -d= -f2- | tr -d '[:space:]')" ]; then
+  # Turnstile aktif: request tanpa token memang harus ditolak.
+  # Itu sekaligus bukti verifikasi keamanan benar-benar berjalan.
+  echo "$CREATE" | grep -q 'verifikasi keamanan gagal' || { $COMPOSE logs --tail=50 api; die "smoke gagal (turnstile aktif): $CREATE"; }
+  log "smoke OK: Turnstile aktif dan menolak request tanpa token"
+else
+  echo "$CREATE" | grep -q '"address"' || { $COMPOSE logs --tail=50 api; die "smoke gagal: $CREATE"; }
+  log "smoke OK: $(echo "$CREATE" | grep -o '"address":"[^"]*"' | head -1)"
+fi
 
 log "cek homepage web"
 PAGE="$(curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/ || true)"
